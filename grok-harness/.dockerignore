@@ -1,0 +1,25 @@
+# Git and IDE
+.git
+.gitignore
+.venv
+.vscode
+.idea
+*.swp
+*.swo
+
+# Tests and docs (reduce image size)
+tests/
+docs/
+*.md
+!README.md
+
+# Build artifacts
+dist/
+build/
+*.egg-info
+.pytest_cache
+.coverage
+htmlcov/
+
+# Local config (use env vars in container)
+.grok-harness/

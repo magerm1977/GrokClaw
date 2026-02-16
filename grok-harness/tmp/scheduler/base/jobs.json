@@ -1,0 +1,31 @@
+[
+  {
+    "id": "006cc38c-16d0-4cb6-a8c3-e6c9a07efa2f",
+    "name": "test_job",
+    "schedule": {
+      "type": "cron",
+      "value": "*/5 * * * *",
+      "start_date": null,
+      "end_date": null,
+      "timezone": "UTC"
+    },
+    "status": "scheduled",
+    "priority": 1,
+    "max_instances": 1,
+    "max_retries": 3,
+    "retry_delay": 60,
+    "created_at": "2026-02-16T13:39:12.075313",
+    "updated_at": "2026-02-16T13:39:12.075313",
+    "last_run": null,
+    "next_run": null,
+    "total_runs": 0,
+    "successful_runs": 0,
+    "failed_runs": 0,
+    "tags": [
+      "test"
+    ],
+    "user_id": null,
+    "metadata": {},
+    "resources": null
+  }
+]
