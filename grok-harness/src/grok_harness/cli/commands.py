@@ -452,7 +452,44 @@ Examples:
         help="Show current local time and optional timezone",
     )
 
+    # Date command
+    subparsers.add_parser(
+        "date",
+        help="Get the verified current date",
+    )
+
+    # Analyze command
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="Analyze a website and get content-based insights",
+    )
+    analyze_parser.add_argument(
+        "url",
+        type=str,
+        help="URL to analyze",
+    )
+    analyze_parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Perform deep analysis (reserved for future use)",
+    )
+
+    # News command
+    news_parser = subparsers.add_parser(
+        "news",
+        help="Get current news and headlines",
+    )
+    news_parser.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="Number of headlines to show",
+    )
+
     return parser
+
+
+_chat_sessions: Dict[str, Any] = {}
 
 
 async def run_chat(
@@ -494,9 +531,23 @@ async def run_chat(
         grok = GrokClient(grok_cfg)
         await grok.__aenter__()
 
-    agent = NamedAgent(name=name, grok=grok)
-    console.print(f"\n[bold cyan]Chatting with {name}[/]")
-    console.print("[dim]Type /exit to quit, /reset to reset conversation[/]\n")
+    session_key = f"chat_{name}"
+    if session_key in _chat_sessions:
+        agent = _chat_sessions[session_key]
+        console.print(f"[dim]Resuming chat with {name}...[/]")
+    else:
+        agent = NamedAgent(name=name, grok=grok)
+        _chat_sessions[session_key] = agent
+        console.print(f"\n[bold cyan]Chatting with {name}[/]")
+        current_date = agent.get_current_date()
+        if agent.user_provided_date:
+            console.print(f"[dim]Current date: {current_date} (from previous session)[/]")
+        else:
+            console.print(f"[dim]Current date: {current_date} (system time)[/]")
+        console.print(
+            "[dim]Type /exit to quit, /reset to reset conversation, "
+            "/setdate <date> to change date[/]\n"
+        )
 
     try:
         if message:
@@ -519,6 +570,9 @@ async def run_chat(
                         break
                     if user_input.lower() == "/reset":
                         await agent.reset_conversation()
+                        agent.user_provided_date = None
+                        agent.date_confirmed = False
+                        agent._save_state()
                         console.print("[dim]Conversation reset[/]")
                         continue
                     response = await agent.chat(user_input)
@@ -548,6 +602,84 @@ async def run_weather(args: argparse.Namespace) -> None:
         console.print(_safe_str(result["data"]))
     else:
         print_error(f"Weather error: {result.get('error', 'Unknown')}")
+
+
+async def run_analyze(
+    args: argparse.Namespace,
+) -> None:
+    """Run site analysis."""
+    from ..tools.site_analyzer import SiteAnalyzer
+
+    url = getattr(args, "url", "").strip()
+    if not url:
+        print_error("Please provide a URL")
+        return
+
+    print_info(f"Analyzing {url}...")
+    result = await SiteAnalyzer.analyze(url)
+
+    if "error" in result:
+        print_error(result["error"])
+        return
+
+    print_header("Site Analysis Results")
+    console.print(f"[bold]URL:[/] {result['url']}")
+    console.print(f"[bold]Title:[/] {_safe_str(result['title'])}")
+    console.print(f"[bold]Description:[/] {_safe_str(result['description'][:200])}")
+
+    print_header("Headlines")
+    for level, headlines in result.get("headlines", {}).items():
+        if headlines:
+            console.print(f"[bold]{level.upper()}:[/]")
+            for h in headlines[:3]:
+                console.print(f"  - {_safe_str(h)}")
+
+    if result.get("key_messages"):
+        print_header("Key Messages")
+        for msg in result["key_messages"][:5]:
+            console.print(f"  - {_safe_str(msg)}")
+
+    print_header("Purpose Detection")
+    purpose = result["purpose_detection"]
+    console.print(f"[bold]Primary:[/] {purpose['primary']}")
+    console.print(f"[bold]Confidence:[/] {purpose['confidence']*100:.0f}%")
+
+
+async def run_news(args: argparse.Namespace) -> None:
+    """Get current news headlines."""
+    from datetime import datetime
+
+    from ..tools.current_events import CurrentEventsTool
+
+    limit = getattr(args, "limit", 5) or 5
+    news = await CurrentEventsTool.get_current_news(limit=limit)
+
+    if news:
+        print_header(
+            f"Current Headlines (as of {datetime.now().strftime('%B %d, %Y')})"
+        )
+        for i, item in enumerate(news, 1):
+            console.print(f"{i}. [bold]{_safe_str(item['title'])}[/]")
+            if item.get("url"):
+                console.print(f"   [dim]{item['source']} - {item['url']}[/]")
+        console.print()
+    else:
+        print_warning("Could not fetch current news")
+
+
+async def run_date(args: argparse.Namespace) -> None:
+    """Get verified current date."""
+    from ..tools.current_events import CurrentEventsTool
+
+    date_info = await CurrentEventsTool.get_current_date()
+
+    if date_info["success"]:
+        print_success(f"Verified Current Date: {date_info['date']}")
+        print_info(f"Source: {date_info['source']}")
+        if date_info.get("warning"):
+            print_warning(date_info["warning"])
+    else:
+        print_error("Could not verify current date")
 
 
 async def run_time_command() -> None:
@@ -1177,8 +1309,17 @@ async def main_async() -> int:
         elif args.command == "weather":
             await run_weather(args)
 
+        elif args.command == "date":
+            await run_date(args)
+
         elif args.command == "time":
             await run_time_command()
+
+        elif args.command == "analyze":
+            await run_analyze(args)
+
+        elif args.command == "news":
+            await run_news(args)
 
     finally:
         if scheduler is not None:

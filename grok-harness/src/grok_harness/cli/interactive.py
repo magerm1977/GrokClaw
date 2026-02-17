@@ -40,6 +40,7 @@ class InteractiveMode:
             "exit": self.exit,
             "quit": self.exit,
             "agent": self.run_agent,
+            "analyze": self.run_analyze,
             "chat": self._handle_chat_mode,
             "schedule": self.schedule_job,
             "jobs": self.list_jobs,
@@ -149,6 +150,8 @@ class InteractiveMode:
 
 [bold]health[/] - Show system health
 [bold]stats[/] - Show statistics
+[bold]analyze [url][/] - Analyze a website
+  Example: analyze https://coachframe.io
 [bold]chat [name][/] - Chat with named agent (use /exit to return)
   Example: chat Fred
 [bold]clear[/] - Clear screen
@@ -209,6 +212,49 @@ class InteractiveMode:
                 console.print("\n[bold]Results:[/]")
                 for key, value in result.results.items():
                     console.print(f"  {key}: {value}")
+
+    async def run_analyze(self, args: List[str]) -> None:
+        """Analyze a website."""
+        if not args:
+            print_error("Usage: analyze <url>")
+            return
+
+        url = args[0].strip()
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+
+        from ..tools.site_analyzer import SiteAnalyzer
+        from .output import _safe_str
+
+        print_info(f"Analyzing {url}...")
+        result = await SiteAnalyzer.analyze(url)
+
+        if "error" in result:
+            print_error(result["error"])
+            return
+
+        print_header("Site Analysis Results")
+        console.print(f"[bold]URL:[/] {result['url']}")
+        console.print(f"[bold]Title:[/] {_safe_str(result['title'])}")
+        desc = result.get("description", "")
+        console.print(f"[bold]Description:[/] {_safe_str(desc[:200])}")
+
+        print_header("Headlines")
+        for level, headlines in result.get("headlines", {}).items():
+            if headlines:
+                console.print(f"[bold]{level.upper()}:[/]")
+                for h in headlines[:3]:
+                    console.print(f"  - {_safe_str(h)}")
+
+        if result.get("key_messages"):
+            print_header("Key Messages")
+            for msg in result["key_messages"][:5]:
+                console.print(f"  - {_safe_str(msg)}")
+
+        print_header("Purpose Detection")
+        purpose = result["purpose_detection"]
+        console.print(f"[bold]Primary:[/] {purpose['primary']}")
+        console.print(f"[bold]Confidence:[/] {purpose['confidence']*100:.0f}%")
 
     async def schedule_job(self, args: List[str]) -> None:
         """Schedule a job."""
