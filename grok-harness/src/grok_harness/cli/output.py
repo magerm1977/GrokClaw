@@ -32,6 +32,14 @@ from rich.tree import Tree
 console = Console()
 
 
+def _safe_str(val: Any) -> str:
+    """Convert value to string safe for cp1252 output."""
+    s = str(val)
+    if _SAFE_SYMBOLS:
+        return s.encode("ascii", "replace").decode("ascii")
+    return s
+
+
 def create_progress_callback() -> tuple[
     Callable[..., None],
     Callable[[], Any],

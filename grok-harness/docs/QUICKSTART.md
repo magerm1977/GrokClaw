@@ -32,6 +32,11 @@ grok-harness config set browser.headless true
 ## Basic Usage
 
 ```bash
+# One-line shortcuts
+grok-harness weather Pensacola
+grok-harness time
+grok-harness chat Fred
+
 # Run a browser agent
 grok-harness agent "Get the title from example.com" --headless
 

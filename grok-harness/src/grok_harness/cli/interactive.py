@@ -32,12 +32,15 @@ class InteractiveMode:
         self.scheduler: Optional[SmartScheduler] = None
         self.memory: Optional[UnifiedMemory] = None
         self.running = True
+        self.mode = "command"
+        self.chat_agent = None
 
         self.commands = {
             "help": self.show_help,
             "exit": self.exit,
             "quit": self.exit,
             "agent": self.run_agent,
+            "chat": self._handle_chat_mode,
             "schedule": self.schedule_job,
             "jobs": self.list_jobs,
             "memory": self.search_memory,
@@ -101,6 +104,16 @@ class InteractiveMode:
         if not command_line:
             return
 
+        if self.mode == "chat":
+            if command_line.strip().lower() == "/exit":
+                self.mode = "command"
+                print_info("Returned to command mode")
+                return
+            if self.chat_agent:
+                response = await self.chat_agent.chat(command_line)
+                console.print(response)
+            return
+
         parts = command_line.split()
         cmd = parts[0].lower()
         args = parts[1:]
@@ -115,7 +128,7 @@ class InteractiveMode:
                 await handler(args)
         else:
             print_error(f"Unknown command: {cmd}")
-            print_info("Type 'help' for available commands")
+            print_info("Type 'help' for available commands, or 'chat [name]' to chat")
 
     async def show_help(self, args: List[str]) -> None:
         """Show help."""
@@ -136,10 +149,26 @@ class InteractiveMode:
 
 [bold]health[/] - Show system health
 [bold]stats[/] - Show statistics
+[bold]chat [name][/] - Chat with named agent (use /exit to return)
+  Example: chat Fred
 [bold]clear[/] - Clear screen
 [bold]exit[/] - Exit interactive mode
         """
         console.print(Panel(help_text.strip(), title="Help", border_style="blue"))
+
+    async def _handle_chat_mode(self, args: List[str]) -> None:
+        """Switch to chat mode with named agent."""
+        from ..agent.named_agent import NamedAgent
+
+        name = args[0] if args else "Fred"
+        self.chat_agent = NamedAgent(
+            name=name,
+            grok=self.grok,
+            memory=self.memory,
+        )
+        self.mode = "chat"
+        print_info(f"Switched to chat mode with {name}")
+        console.print("[dim]Type messages naturally. Use /exit to return to command mode.[/]")
 
     async def run_agent(self, args: List[str]) -> None:
         """Run browser agent."""

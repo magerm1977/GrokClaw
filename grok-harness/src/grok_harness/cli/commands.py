@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from rich.prompt import Confirm
+from rich.prompt import Confirm, Prompt
 from rich.syntax import Syntax
 from rich.table import Table
 
@@ -23,6 +23,7 @@ from ..scheduler.models import JobPriority
 from ..scheduler.smart import SmartScheduler
 from .interactive import InteractiveMode
 from .output import (
+    _safe_str,
     console,
     live_progress_display,
     print_error,
@@ -47,11 +48,13 @@ def create_parser() -> argparse.ArgumentParser:
         epilog="""
 Examples:
   grok-harness agent "Get weather in London" --headless
+  grok-harness weather Pensacola
+  grok-harness time
+  grok-harness chat "What is the weather?" --name Fred
   grok-harness schedule add "0 9 * * *" "agent daily report" --name "Daily Report"
-  grok-harness jobs list
   grok-harness memory search "prices" --semantic
   grok-harness monitor health
-  grok-harness interactive
+  grok-harness interactive    Interactive mode with chat, agent, schedule
         """,
     )
 
@@ -401,7 +404,172 @@ Examples:
         help="Require approval for high-risk actions",
     )
 
+    # Chat command
+    chat_parser = subparsers.add_parser(
+        "chat",
+        help="Have a conversation with a named agent",
+    )
+    chat_parser.add_argument(
+        "message",
+        type=str,
+        nargs="*",
+        help="Optional initial message; omit to start loop directly",
+    )
+    chat_parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="Agent name (default: Fred); 'chat Fred' uses Fred as name",
+    )
+    chat_parser.add_argument(
+        "--no-loop",
+        action="store_true",
+        help="Single message only, no interactive loop",
+    )
+
+    # Weather shortcut
+    weather_parser = subparsers.add_parser(
+        "weather",
+        help="Quick weather check (no browser, no API key)",
+    )
+    weather_parser.add_argument(
+        "location",
+        type=str,
+        nargs="?",
+        default="",
+        help="Location (e.g. Pensacola, London)",
+    )
+    weather_parser.add_argument(
+        "--forecast",
+        "-f",
+        action="store_true",
+        help="Show 3-day forecast",
+    )
+
+    # Time command
+    subparsers.add_parser(
+        "time",
+        help="Show current local time and optional timezone",
+    )
+
     return parser
+
+
+async def run_chat(
+    args: argparse.Namespace,
+    config: Union[FullConfig, Dict[str, Any]],
+) -> None:
+    """Run chat mode with named agent."""
+    from ..agent.named_agent import NamedAgent
+
+    msg_parts = getattr(args, "message", []) or []
+    # "chat Fred" => name=Fred, no message; "chat hi" => message="hi", name=Fred
+    if len(msg_parts) == 1 and not getattr(args, "name", None):
+        single = msg_parts[0]
+        if single[0].isupper() and len(single) < 20 and single.isalpha():
+            name = single
+            message = ""
+        else:
+            name = "Fred"
+            message = single
+    else:
+        name = getattr(args, "name", None) or "Fred"
+        message = " ".join(msg_parts)
+    no_loop = getattr(args, "no_loop", False)
+
+    grok = None
+    if isinstance(config, FullConfig):
+        api_key = (
+            config.grok.api_key
+            or os.environ.get("XAI_API_KEY")
+            or os.environ.get("GROK_API_KEY")
+        )
+    else:
+        api_key = os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY")
+
+    if api_key:
+        grok_cfg = config.grok if isinstance(config, FullConfig) else GrokConfig()
+        if not getattr(grok_cfg, "api_key", None):
+            grok_cfg = GrokConfig(api_key=api_key)
+        grok = GrokClient(grok_cfg)
+        await grok.__aenter__()
+
+    agent = NamedAgent(name=name, grok=grok)
+    console.print(f"\n[bold cyan]Chatting with {name}[/]")
+    console.print("[dim]Type /exit to quit, /reset to reset conversation[/]\n")
+
+    try:
+        if message:
+            console.print(f"[bold green]You:[/] {message}")
+            response = await agent.chat(message)
+            console.print(response)
+        elif no_loop:
+            console.print("[dim]No message. Use 'chat \"hi\"' or 'chat Fred' to chat with agent Fred[/]")
+            return
+
+        if not no_loop:
+            if not message:
+                console.print("[dim]Type your message and press Enter.[/]")
+            while True:
+                try:
+                    user_input = Prompt.ask(f"\n[bold green]You[/]")
+                    if not user_input:
+                        continue
+                    if user_input.lower() == "/exit":
+                        break
+                    if user_input.lower() == "/reset":
+                        await agent.reset_conversation()
+                        console.print("[dim]Conversation reset[/]")
+                        continue
+                    response = await agent.chat(user_input)
+                    console.print(response)
+                except (KeyboardInterrupt, EOFError):
+                    break
+    finally:
+        if grok:
+            await grok.__aexit__(None, None, None)
+
+
+async def run_weather(args: argparse.Namespace) -> None:
+    """Quick weather check."""
+    from ..tools.weather import WeatherTool
+
+    location = (getattr(args, "location", None) or "").strip()
+    if not location:
+        location = "Pensacola"
+    forecast = getattr(args, "forecast", False)
+
+    if forecast:
+        result = await WeatherTool.get_forecast(location, 3)
+    else:
+        result = await WeatherTool.get_current(location)
+
+    if result.get("success"):
+        console.print(_safe_str(result["data"]))
+    else:
+        print_error(f"Weather error: {result.get('error', 'Unknown')}")
+
+
+async def run_time_command() -> None:
+    """Show current time with optional timezone."""
+    from datetime import datetime
+
+    tz_name = os.environ.get("TZ", "local")
+    if tz_name != "local":
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(tz_name)
+            now = datetime.now(tz)
+        except Exception:
+            now = datetime.now()
+            tz_name = "local"
+    else:
+        now = datetime.now()
+
+    console.print(f"[bold]Local time:[/] {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    if tz_name != "local":
+        console.print(f"[dim]Timezone: {tz_name}[/]")
+    console.print("[dim]Set TZ for timezone (e.g. TZ=America/New_York)[/]")
 
 
 def _priority_from_str(s: str) -> JobPriority:
@@ -476,6 +644,19 @@ async def run_agent(
                     "episodes_added": result.episodes_added,
                 })
         else:
+            # Minimal progress when --no-live
+            def _minimal_progress(
+                step_num: int = 0,
+                total: int = 0,
+                action: str = "",
+                status: str = "running",
+                **kwargs: Any,
+            ) -> None:
+                if step_num and total:
+                    sym = "[OK]" if status == "success" else "[X]" if status == "error" else "..."
+                    console.print(f"  Step {step_num}/{total}: {action} {sym}")
+
+            orchestrator.set_progress_callback(_minimal_progress)
             result = await orchestrator.run(args.goal, opts)
 
         if result.status == "success":
@@ -492,9 +673,9 @@ async def run_agent(
             if isinstance(res, dict):
                 for key, value in res.items():
                     if key != "screenshot" and key != "error":
-                        console.print(f"  {key}: {value}")
+                        console.print(f"  {key}: {_safe_str(value)}")
             else:
-                console.print(f"  {res}")
+                console.print(f"  {_safe_str(res)}")
 
         if args.save_results:
             with open(args.save_results, "w", encoding="utf-8") as f:
@@ -989,6 +1170,15 @@ async def main_async() -> int:
 
         elif args.command == "run":
             await run_run_command(args, config)
+
+        elif args.command == "chat":
+            await run_chat(args, config)
+
+        elif args.command == "weather":
+            await run_weather(args)
+
+        elif args.command == "time":
+            await run_time_command()
 
     finally:
         if scheduler is not None:
