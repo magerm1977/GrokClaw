@@ -48,4 +48,5 @@ __all__ = [
     "OperationTimeoutError",
     "ResourceError",
     "ValidationError",
+    "MessagingError",
 ]

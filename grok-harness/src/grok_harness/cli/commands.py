@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -14,7 +15,9 @@ from rich.table import Table
 
 from ..browser.agent import GrokBrowserAgent
 from ..core.config_manager import ConfigManager
+from ..utils.errors import BrowserError
 from ..core.grok_client import GrokClient
+from ..core.providers import get_llm_client_from_config, get_provider, get_provider_names
 from ..core.orchestrator import Orchestrator, RunOptions, RunResult
 from ..core.types import BrowserConfig, FullConfig, GrokConfig
 from ..memory.models import MemoryItemType
@@ -50,7 +53,7 @@ Examples:
   grok-harness agent "Get weather in London" --headless
   grok-harness weather Pensacola
   grok-harness time
-  grok-harness chat "What is the weather?" --name Fred
+  grok-harness chat "What is the weather?" --name Assistant
   grok-harness schedule add "0 9 * * *" "agent daily report" --name "Daily Report"
   grok-harness memory search "prices" --semantic
   grok-harness monitor health
@@ -357,6 +360,33 @@ Examples:
         help="Show optimization report",
     )
 
+    # Onboard command
+    onboard_parser = subparsers.add_parser(
+        "onboard",
+        help="Onboarding wizard",
+    )
+    onboard_subparsers = onboard_parser.add_subparsers(
+        dest="onboard_command",
+        help="Onboarding steps",
+        required=True,
+    )
+    onboard_llm = onboard_subparsers.add_parser(
+        "llm",
+        help="Configure LLM provider (Grok, Claude, etc.)",
+    )
+    onboard_llm.add_argument(
+        "--provider",
+        type=str,
+        choices=get_provider_names(),
+        default="grok",
+        help="Provider to configure",
+    )
+    onboard_llm.add_argument(
+        "--api-key",
+        type=str,
+        help="API key (or set via env var)",
+    )
+
     # Config command
     config_parser = subparsers.add_parser(
         "config",
@@ -380,7 +410,7 @@ Examples:
     config_set.add_argument(
         "key",
         type=str,
-        help="Configuration key (e.g., grok.model)",
+        help="Configuration key (e.g., grok.model, llm.primary, llm.api_keys.grok)",
     )
     config_set.add_argument(
         "value",
@@ -391,6 +421,11 @@ Examples:
     subparsers.add_parser(
         "interactive",
         help="Start interactive mode",
+    )
+
+    setup_parser = subparsers.add_parser(
+        "setup",
+        help="Run interactive setup wizard",
     )
 
     run_parser = subparsers.add_parser(
@@ -419,7 +454,7 @@ Examples:
         "--name",
         type=str,
         default=None,
-        help="Agent name (default: Fred); 'chat Fred' uses Fred as name",
+        help="Agent name (default: Assistant); 'chat MyBot' uses MyBot as name",
     )
     chat_parser.add_argument(
         "--no-loop",
@@ -486,6 +521,201 @@ Examples:
         help="Number of headlines to show",
     )
 
+    # Session command group (multi-agent)
+    session_parser = subparsers.add_parser(
+        "session",
+        help="Manage agent sessions (multi-agent)",
+    )
+    session_subparsers = session_parser.add_subparsers(
+        dest="session_command",
+        help="Session commands",
+        required=True,
+    )
+
+    session_subparsers.add_parser(
+        "list",
+        help="List active sessions",
+    )
+
+    session_create = session_subparsers.add_parser(
+        "create",
+        help="Create a new agent session",
+    )
+    session_create.add_argument(
+        "--name",
+        type=str,
+        required=True,
+        help="Agent name",
+    )
+    session_create.add_argument(
+        "--soul",
+        type=str,
+        help="Soul prompt for the agent",
+    )
+    session_create.add_argument(
+        "--parent",
+        type=str,
+        help="Parent session ID",
+    )
+
+    session_send = session_subparsers.add_parser(
+        "send",
+        help="Send message to a session",
+    )
+    session_send.add_argument(
+        "session_id",
+        type=str,
+        help="Target session ID",
+    )
+    session_send.add_argument(
+        "message",
+        type=str,
+        nargs="+",
+        help="Message to send",
+    )
+
+    session_terminate = session_subparsers.add_parser(
+        "terminate",
+        help="Terminate a session",
+    )
+    session_terminate.add_argument(
+        "session_id",
+        type=str,
+        help="Session ID to terminate",
+    )
+
+    # Heartbeat command group
+    heartbeat_parser = subparsers.add_parser(
+        "heartbeat",
+        help="Manage agent heartbeats (proactive behavior)",
+    )
+    heartbeat_subparsers = heartbeat_parser.add_subparsers(
+        dest="heartbeat_command",
+        help="Heartbeat commands",
+        required=True,
+    )
+
+    heartbeat_start = heartbeat_subparsers.add_parser(
+        "start",
+        help="Start heartbeat engine",
+    )
+    heartbeat_start.add_argument(
+        "--interval",
+        type=int,
+        default=1800,
+        help="Heartbeat interval in seconds (default: 1800)",
+    )
+
+    heartbeat_subparsers.add_parser(
+        "stop",
+        help="Stop heartbeat engine",
+    )
+
+    heartbeat_subparsers.add_parser(
+        "status",
+        help="Show heartbeat status",
+    )
+
+    heartbeat_config = heartbeat_subparsers.add_parser(
+        "config",
+        help="Configure heartbeat for a session",
+    )
+    heartbeat_config.add_argument(
+        "session_id",
+        type=str,
+        help="Session ID",
+    )
+    heartbeat_config.add_argument(
+        "--enable",
+        action="store_true",
+        help="Enable heartbeat",
+    )
+    heartbeat_config.add_argument(
+        "--disable",
+        action="store_true",
+        help="Disable heartbeat",
+    )
+    heartbeat_config.add_argument(
+        "--task",
+        type=str,
+        help="Custom heartbeat task prompt",
+    )
+
+    # Status command
+    subparsers.add_parser(
+        "status",
+        help="Show system status (sessions, heartbeat, memory)",
+    )
+
+    # Daemon command
+    daemon_parser = subparsers.add_parser(
+        "daemon",
+        help="Run GrokClaw daemon (sessions + heartbeat)",
+    )
+    daemon_parser.add_argument(
+        "--config",
+        type=str,
+        help="Path to config file",
+    )
+
+    # Telegram command group
+    telegram_parser = subparsers.add_parser(
+        "telegram",
+        help="Telegram integration",
+    )
+    telegram_subparsers = telegram_parser.add_subparsers(
+        dest="telegram_command",
+        help="Telegram commands",
+        required=True,
+    )
+
+    telegram_onboard = telegram_subparsers.add_parser(
+        "onboard",
+        help="Configure Telegram bot",
+    )
+    telegram_onboard.add_argument(
+        "--token",
+        type=str,
+        required=True,
+        help="Bot token from @BotFather",
+    )
+    telegram_onboard.add_argument(
+        "--chat-id",
+        type=str,
+        help="Default chat ID for notifications",
+    )
+    telegram_onboard.add_argument(
+        "--no-encrypt",
+        action="store_true",
+        help="Disable token encryption (not recommended)",
+    )
+
+    telegram_test = telegram_subparsers.add_parser(
+        "test",
+        help="Test Telegram connection",
+    )
+    telegram_test.add_argument(
+        "--message",
+        type=str,
+        default="Hello from GrokClaw!",
+        help="Test message to send",
+    )
+
+    telegram_subparsers.add_parser(
+        "status",
+        help="Show Telegram status",
+    )
+
+    telegram_listen = telegram_subparsers.add_parser(
+        "listen",
+        help="Start Telegram listener (inbound messages)",
+    )
+    telegram_listen.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run as daemon",
+    )
+
     return parser
 
 
@@ -500,43 +730,39 @@ async def run_chat(
     from ..agent.named_agent import NamedAgent
 
     msg_parts = getattr(args, "message", []) or []
-    # "chat Fred" => name=Fred, no message; "chat hi" => message="hi", name=Fred
+    # "chat Assistant" => name=Assistant, no message; "chat hi" => message="hi", name=Assistant
     if len(msg_parts) == 1 and not getattr(args, "name", None):
         single = msg_parts[0]
         if single[0].isupper() and len(single) < 20 and single.isalpha():
             name = single
             message = ""
         else:
-            name = "Fred"
+            name = "Assistant"
             message = single
     else:
-        name = getattr(args, "name", None) or "Fred"
+        name = getattr(args, "name", None) or "Assistant"
         message = " ".join(msg_parts)
     no_loop = getattr(args, "no_loop", False)
 
-    grok = None
-    if isinstance(config, FullConfig):
-        api_key = (
-            config.grok.api_key
-            or os.environ.get("XAI_API_KEY")
-            or os.environ.get("GROK_API_KEY")
-        )
-    else:
-        api_key = os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY")
-
-    if api_key:
-        grok_cfg = config.grok if isinstance(config, FullConfig) else GrokConfig()
-        if not getattr(grok_cfg, "api_key", None):
-            grok_cfg = GrokConfig(api_key=api_key)
-        grok = GrokClient(grok_cfg)
-        await grok.__aenter__()
+    llm_client = _get_llm_client(config)
+    if llm_client:
+        await llm_client.__aenter__()
 
     session_key = f"chat_{name}"
     if session_key in _chat_sessions:
         agent = _chat_sessions[session_key]
         console.print(f"[dim]Resuming chat with {name}...[/]")
     else:
-        agent = NamedAgent(name=name, grok=grok)
+        agent = NamedAgent(name=name, grok=llm_client)
+        # Detect text-only mode if browser/Playwright unavailable
+        try:
+            from playwright.async_api import async_playwright
+
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                await browser.close()
+        except Exception:
+            agent.text_only_mode = True
         _chat_sessions[session_key] = agent
         console.print(f"\n[bold cyan]Chatting with {name}[/]")
         current_date = agent.get_current_date()
@@ -555,7 +781,7 @@ async def run_chat(
             response = await agent.chat(message)
             console.print(response)
         elif no_loop:
-            console.print("[dim]No message. Use 'chat \"hi\"' or 'chat Fred' to chat with agent Fred[/]")
+            console.print("[dim]No message. Use 'chat \"hi\"' or 'chat Assistant' to start[/]")
             return
 
         if not no_loop:
@@ -572,7 +798,7 @@ async def run_chat(
                         await agent.reset_conversation()
                         agent.user_provided_date = None
                         agent.date_confirmed = False
-                        agent._save_state()
+                        agent._save_memory()
                         console.print("[dim]Conversation reset[/]")
                         continue
                     response = await agent.chat(user_input)
@@ -580,8 +806,8 @@ async def run_chat(
                 except (KeyboardInterrupt, EOFError):
                     break
     finally:
-        if grok:
-            await grok.__aexit__(None, None, None)
+        if llm_client:
+            await llm_client.__aexit__(None, None, None)
 
 
 async def run_weather(args: argparse.Namespace) -> None:
@@ -645,6 +871,326 @@ async def run_analyze(
     console.print(f"[bold]Confidence:[/] {purpose['confidence']*100:.0f}%")
 
 
+async def run_session_command(
+    args: argparse.Namespace,
+    config: Union[FullConfig, Dict[str, Any]],
+    session_manager: Any,
+) -> None:
+    """Handle session commands."""
+    if args.session_command == "list":
+        sessions = session_manager.list_sessions()
+        if sessions:
+            table = Table(title="Active Agent Sessions")
+            table.add_column("ID", style="cyan")
+            table.add_column("Name", style="green")
+            table.add_column("Status", style="yellow")
+            table.add_column("Messages", style="blue")
+            table.add_column("Parent", style="magenta")
+            for s in sessions:
+                table.add_row(
+                    s["session_id"],
+                    s["name"],
+                    s["status"],
+                    str(s["message_count"]),
+                    s["parent"] or "-",
+                )
+            console.print(table)
+        else:
+            print_info("No active sessions")
+
+    elif args.session_command == "create":
+        soul = args.soul or f"You are a {args.name} agent. Be helpful and professional."
+        try:
+            session_id = await session_manager.create_session(
+                name=args.name,
+                soul_prompt=soul,
+                parent_session_id=getattr(args, "parent", None),
+            )
+            print_success(f"Created session: {session_id} ({args.name})")
+        except Exception as e:
+            print_error(f"Failed to create session: {e}")
+
+    elif args.session_command == "send":
+        message = " ".join(args.message)
+        try:
+            result = await session_manager.send_message(args.session_id, message)
+            if result.get("success"):
+                res = result.get("result")
+                if isinstance(res, dict):
+                    console.print(
+                        f"[bold green]{result['agent_name']}:[/] "
+                        f"{_safe_str(res.get('result', res))}"
+                    )
+                else:
+                    console.print(
+                        f"[bold green]{result['agent_name']}:[/] {_safe_str(res)}"
+                    )
+            else:
+                print_error(result.get("error", "Unknown error"))
+        except ValueError as e:
+            print_error(str(e))
+        except Exception as e:
+            print_error(f"Send failed: {e}")
+
+    elif args.session_command == "terminate":
+        try:
+            success = await session_manager.terminate_session(args.session_id)
+            if success:
+                print_success(f"Session {args.session_id} terminated")
+            else:
+                print_error(f"Session {args.session_id} not found")
+        except Exception as e:
+            print_error(f"Terminate failed: {e}")
+
+
+async def run_heartbeat_command(
+    args: argparse.Namespace,
+    session_manager: Any,
+    heartbeat_engine: Any,
+) -> None:
+    """Handle heartbeat commands."""
+    if args.heartbeat_command == "start":
+        if hasattr(args, "interval") and args.interval:
+            heartbeat_engine.config.interval_seconds = args.interval
+        await heartbeat_engine.start()
+        print_success(
+            f"Heartbeat engine started (interval: {heartbeat_engine.config.interval_seconds}s)"
+        )
+
+    elif args.heartbeat_command == "stop":
+        await heartbeat_engine.stop()
+        print_success("Heartbeat engine stopped")
+
+    elif args.heartbeat_command == "status":
+        stats = heartbeat_engine.get_stats()
+        console.print("[bold]Heartbeat Status:[/]")
+        console.print(f"  Running: {stats['running']}")
+        console.print(f"  Total heartbeats: {stats['total_heartbeats']}")
+        console.print(f"  Sessions monitored: {stats['sessions_monitored']}")
+        if stats.get("last_heartbeats"):
+            console.print("\n[bold]Last heartbeats:[/]")
+            for sid, ts in list(stats["last_heartbeats"].items())[:5]:
+                console.print(f"  {sid}: {ts}")
+
+    elif args.heartbeat_command == "config":
+        session = session_manager.get_session(args.session_id)
+        if not session:
+            print_error(f"Session {args.session_id} not found")
+            return
+        if args.enable:
+            session.heartbeat_enabled = True
+            print_success(f"Heartbeat enabled for session {args.session_id}")
+        if args.disable:
+            session.heartbeat_enabled = False
+            print_success(f"Heartbeat disabled for session {args.session_id}")
+        if getattr(args, "task", None):
+            session.heartbeat_task = args.task
+            print_success(f"Heartbeat task set for session {args.session_id}")
+
+
+async def run_status_command(
+    args: argparse.Namespace,
+    session_manager: Any,
+    heartbeat_engine: Optional[Any],
+) -> None:
+    """Show system status."""
+    print_header("GrokClaw System Status")
+
+    sessions = session_manager.list_sessions()
+    console.print(f"[bold]Active Sessions:[/] {len(sessions)}")
+    for s in sessions[:5]:
+        console.print(f"  - {s['name']} ({s['session_id']}) - {s['status']}")
+
+    if heartbeat_engine:
+        hb_stats = heartbeat_engine.get_stats()
+        status_str = "Running" if hb_stats["running"] else "Stopped"
+        console.print(f"\n[bold]Heartbeat:[/] {status_str}")
+        console.print(f"  Total heartbeats: {hb_stats['total_heartbeats']}")
+
+        telegram_notifier = getattr(heartbeat_engine, "telegram_notifier", None)
+    else:
+        telegram_notifier = None
+
+    tg_config_path = Path.home() / ".grok-harness" / "telegram.json"
+    if tg_config_path.exists() or telegram_notifier:
+        if telegram_notifier:
+            console.print("\n[bold]Telegram:[/] Connected")
+            tg_stats = telegram_notifier.get_stats()
+            console.print(f"  Messages sent: {tg_stats.get('messages_sent', 0)}")
+            console.print(f"  Queue size: {tg_stats.get('queue_size', 0)}")
+        else:
+            console.print("\n[bold]Telegram:[/] Configured (run daemon to connect)")
+
+    if session_manager.sessions:
+        first_session = list(session_manager.sessions.values())[0]
+        try:
+            memory_stats = await first_session.memory.get_stats()
+            console.print("\n[bold]Memory:[/]")
+            console.print(f"  Total items: {memory_stats.get('total_items', 0)}")
+        except Exception:
+            pass
+
+    console.print("\n[bold]Queue:[/] 0 pending")
+
+
+async def run_telegram_command(
+    args: argparse.Namespace,
+    config: Union[FullConfig, Dict[str, Any]],
+) -> None:
+    """Handle Telegram commands."""
+    from pathlib import Path as PathLib
+
+    config_path = PathLib.home() / ".grok-harness" / "telegram.json"
+
+    if args.telegram_command == "onboard":
+        from ..messaging.telegram_outbound import TelegramNotifier
+        from ..utils.encryption import encrypt_value
+
+        notifier = TelegramNotifier(
+            bot_token=args.token,
+            default_chat_id=getattr(args, "chat_id", None),
+            encrypt_token=not getattr(args, "no_encrypt", False),
+        )
+        try:
+            await notifier.initialize()
+            print_success("Telegram connection successful!")
+
+            save_data: Dict[str, Any] = {
+                "default_chat_id": getattr(args, "chat_id", None),
+                "encrypt": not getattr(args, "no_encrypt", False),
+            }
+            if not getattr(args, "no_encrypt", False):
+                save_data["bot_token"] = encrypt_value(args.token)
+                save_data["encrypted"] = True
+            else:
+                save_data["bot_token"] = args.token
+                save_data["encrypted"] = False
+
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(config_path, "w") as f:
+                json.dump(save_data, f, indent=2)
+            print_success(f"Telegram configuration saved to {config_path}")
+
+            if getattr(args, "chat_id", None):
+                await notifier.send_message(
+                    text="GrokClaw Telegram integration configured successfully!",
+                    chat_id=args.chat_id,
+                )
+                await asyncio.sleep(1)
+                print_success("Test message sent!")
+        except Exception as e:
+            print_error(f"Telegram configuration failed: {e}")
+        finally:
+            await notifier.shutdown()
+
+    elif args.telegram_command == "test":
+        if not config_path.exists():
+            print_error(
+                "Telegram not configured. Run 'grok-harness telegram onboard' first."
+            )
+            return
+        with open(config_path) as f:
+            telegram_config = json.load(f)
+        from ..utils.encryption import decrypt_value
+        from ..messaging.telegram_outbound import TelegramNotifier
+
+        token = telegram_config["bot_token"]
+        if telegram_config.get("encrypted"):
+            token = decrypt_value(token)
+        notifier = TelegramNotifier(
+            bot_token=token,
+            default_chat_id=telegram_config.get("default_chat_id"),
+            encrypt_token=False,
+        )
+        await notifier.initialize()
+        msg = getattr(args, "message", "Hello from GrokClaw!")
+        success = await notifier.send_message(
+            text=msg,
+            chat_id=telegram_config.get("default_chat_id"),
+        )
+        await asyncio.sleep(1)
+        if success:
+            print_success("Test message queued/sent!")
+        else:
+            print_error("Failed to send test message")
+        await notifier.shutdown()
+
+    elif args.telegram_command == "status":
+        if not config_path.exists():
+            print_error("Telegram not configured")
+            return
+        with open(config_path) as f:
+            telegram_config = json.load(f)
+        from ..utils.encryption import decrypt_value
+        from ..messaging.telegram_outbound import TelegramNotifier
+
+        token = telegram_config["bot_token"]
+        if telegram_config.get("encrypted"):
+            token = decrypt_value(token)
+        notifier = TelegramNotifier(
+            bot_token=token,
+            default_chat_id=telegram_config.get("default_chat_id"),
+            encrypt_token=False,
+        )
+        await notifier.initialize()
+        stats = notifier.get_stats()
+        print_header("Telegram Status")
+        console.print(f"Default Chat ID: {telegram_config.get('default_chat_id')}")
+        console.print(f"Encrypted: {telegram_config.get('encrypted', False)}")
+        console.print(f"Messages Sent: {stats.get('messages_sent', 0)}")
+        console.print(f"Messages Failed: {stats.get('messages_failed', 0)}")
+        console.print(f"Queue Size: {stats.get('queue_size', 0)}")
+        if stats.get("last_message_time"):
+            console.print(f"Last Message: {stats['last_message_time']}")
+        await notifier.shutdown()
+
+    elif args.telegram_command == "listen":
+        if not config_path.exists():
+            print_error(
+                "Telegram not configured. Run 'grok-harness telegram onboard' first."
+            )
+            return
+        with open(config_path) as f:
+            telegram_config = json.load(f)
+        from ..utils.encryption import decrypt_value
+        from ..messaging.telegram_outbound import TelegramNotifier
+        from ..core.session_manager import SessionManager
+
+        token = telegram_config["bot_token"]
+        if telegram_config.get("encrypted"):
+            token = decrypt_value(token)
+
+        grok_client = _get_llm_client(config)
+        if not grok_client:
+            print_error("Listen requires LLM API key (XAI_API_KEY or ANTHROPIC_API_KEY)")
+            return
+
+        await grok_client.__aenter__()
+
+        session_manager = SessionManager(config, grok_client)
+        notifier = TelegramNotifier(
+            bot_token=token,
+            default_chat_id=telegram_config.get("default_chat_id"),
+            encrypt_token=False,
+        )
+        await notifier.initialize()
+        listener = notifier.create_listener(
+            session_manager=session_manager,
+            default_session_id=None,
+        )
+        print_success("Telegram listener started. Press Ctrl+C to stop.")
+        await listener.start()
+        try:
+            while True:
+                await asyncio.sleep(60)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            await listener.stop()
+            await notifier.shutdown()
+            await grok_client.__aexit__(None, None, None)
+
+
 async def run_news(args: argparse.Namespace) -> None:
     """Get current news headlines."""
     from datetime import datetime
@@ -704,6 +1250,14 @@ async def run_time_command() -> None:
     console.print("[dim]Set TZ for timezone (e.g. TZ=America/New_York)[/]")
 
 
+def _get_llm_client(config: Union[FullConfig, Dict[str, Any]]) -> Any:
+    """Create LLM client from config (Grok, Claude, etc.). Returns client or None on error."""
+    try:
+        return get_llm_client_from_config(config)
+    except (ValueError, ImportError):
+        return None
+
+
 def _priority_from_str(s: str) -> JobPriority:
     """Convert priority string to enum."""
     return {
@@ -720,40 +1274,39 @@ async def run_agent(
 ) -> None:
     """Run the browser agent via orchestrator (plan, execute, remember)."""
     if isinstance(config, FullConfig):
-        grok_config = config.grok
         browser_config = config.browser
     else:
-        grok_config = GrokConfig()
         browser_config = BrowserConfig()
 
-    api_key = (
-        grok_config.api_key
-        or os.environ.get("XAI_API_KEY")
-        or os.environ.get("GROK_API_KEY")
-    )
-    if not api_key:
-        print_error("No Grok API key found. Set XAI_API_KEY or configure in config.")
+    llm_client = _get_llm_client(config)
+    if not llm_client:
+        primary = getattr(getattr(config, "llm", None), "primary", "grok")
+        print_error(
+            f"No API key for {primary}. Set XAI_API_KEY, ANTHROPIC_API_KEY, "
+            "or configure llm.api_keys in config."
+        )
         return
+
+    await llm_client.__aenter__()
 
     if args.headless:
         browser_config.headless = True
+    # Show Playwright install messages when running agent from CLI
+    browser_config.verbose_playwright_setup = True
 
     memory_config = config.memory if isinstance(config, FullConfig) else ConfigManager.create_default_config().memory
     memory = UnifiedMemory(memory_config)
     await memory.start()
 
-    grok_client = GrokClient(grok_config)
-    await grok_client.__aenter__()
-
     scheduler = SmartScheduler(
-        grok_client=grok_client,
-        enable_learning=bool(grok_client),
+        grok_client=llm_client,
+        enable_learning=bool(llm_client),
         enable_predictive=True,
         enable_monitoring=False,
     )
     await scheduler.start()
 
-    orchestrator = Orchestrator(config, grok_client, memory, scheduler)
+    orchestrator = Orchestrator(config, llm_client, memory, scheduler)
 
     opts = RunOptions(
         interactive=args.interactive,
@@ -764,69 +1317,119 @@ async def run_agent(
     )
 
     try:
-        if opts.live_progress:
-            with live_progress_display() as (progress_cb, set_final):
-                orchestrator.set_progress_callback(progress_cb)
-                result = await orchestrator.run(args.goal, opts)
-                set_final({
-                    "status": result.status,
-                    "steps_completed": result.steps_completed,
-                    "steps_total": result.steps_total,
-                    "duration": result.duration,
-                    "episodes_added": result.episodes_added,
-                })
-        else:
-            # Minimal progress when --no-live
-            def _minimal_progress(
-                step_num: int = 0,
-                total: int = 0,
-                action: str = "",
-                status: str = "running",
-                **kwargs: Any,
-            ) -> None:
-                if step_num and total:
-                    sym = "[OK]" if status == "success" else "[X]" if status == "error" else "..."
-                    console.print(f"  Step {step_num}/{total}: {action} {sym}")
-
-            orchestrator.set_progress_callback(_minimal_progress)
-            result = await orchestrator.run(args.goal, opts)
-
-        if result.status == "success":
-            print_success("Task completed!")
-        else:
-            print_warning(f"Task ended with status: {result.status}")
-
-        console.print(f"Steps: {result.steps_completed}/{result.steps_total}")
-        console.print(f"Duration: {result.duration:.2f}s")
-
-        if result.result:
-            console.print("\n[bold]Results:[/]")
-            res = result.result
-            if isinstance(res, dict):
-                for key, value in res.items():
-                    if key != "screenshot" and key != "error":
-                        console.print(f"  {key}: {_safe_str(value)}")
+        await _run_agent_inner(args, config, llm_client, memory, scheduler, opts)
+    except BrowserError as e:
+        if "Playwright" in str(e):
+            print_warning("Browser automation needs setup")
+            answer = Prompt.ask(
+                "Would you like to install Playwright now?",
+                choices=["y", "n"],
+                default="y",
+            )
+            if answer == "y":
+                print_info("📦 Installing Playwright...")
+                try:
+                    subprocess.check_call(
+                        [
+                            sys.executable,
+                            "-m",
+                            "pip",
+                            "install",
+                            "playwright>=1.40.0",
+                        ]
+                    )
+                    subprocess.check_call(
+                        [
+                            sys.executable,
+                            "-m",
+                            "playwright",
+                            "install",
+                            "chromium",
+                        ]
+                    )
+                    print_success("Playwright installed! Please try again.")
+                except subprocess.CalledProcessError as install_err:
+                    print_error(f"Install failed: {install_err}")
+                    print_info("You can install manually with: playwright install chromium")
             else:
-                console.print(f"  {_safe_str(res)}")
-
-        if args.save_results:
-            with open(args.save_results, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "goal": args.goal,
-                        "results": result.result,
-                        "steps": result.steps_completed,
-                        "duration": result.duration,
-                        "action_history": result.action_history,
-                    },
-                    f,
-                    indent=2,
-                )
-            print_success(f"Results saved to {args.save_results}")
+                print_info("You can install manually with: playwright install chromium")
+        else:
+            print_error(f"Browser error: {e}")
     finally:
         await scheduler.stop()
         await memory.stop()
-        await grok_client.__aexit__(None, None, None)
+        await llm_client.__aexit__(None, None, None)
+
+
+async def _run_agent_inner(
+    args: argparse.Namespace,
+    config: Union[FullConfig, Dict[str, Any]],
+    llm_client: Any,
+    memory: Any,
+    scheduler: SmartScheduler,
+    opts: RunOptions,
+) -> None:
+    """Inner run_agent logic (extracted for Playwright error handling)."""
+    orchestrator = Orchestrator(config, llm_client, memory, scheduler)
+    if opts.live_progress:
+        with live_progress_display() as (progress_cb, set_final):
+            orchestrator.set_progress_callback(progress_cb)
+            result = await orchestrator.run(args.goal, opts)
+            set_final({
+                "status": result.status,
+                "steps_completed": result.steps_completed,
+                "steps_total": result.steps_total,
+                "duration": result.duration,
+                "episodes_added": result.episodes_added,
+            })
+    else:
+        # Minimal progress when --no-live
+        def _minimal_progress(
+            step_num: int = 0,
+            total: int = 0,
+            action: str = "",
+            status: str = "running",
+            **kwargs: Any,
+        ) -> None:
+            if step_num and total:
+                sym = "[OK]" if status == "success" else "[X]" if status == "error" else "..."
+                console.print(f"  Step {step_num}/{total}: {action} {sym}")
+
+        orchestrator.set_progress_callback(_minimal_progress)
+        result = await orchestrator.run(args.goal, opts)
+
+    if result.status == "success":
+        print_success("Task completed!")
+    else:
+        print_warning(f"Task ended with status: {result.status}")
+
+    console.print(f"Steps: {result.steps_completed}/{result.steps_total}")
+    console.print(f"Duration: {result.duration:.2f}s")
+
+    if result.result:
+        console.print("\n[bold]Results:[/]")
+        res = result.result
+        if isinstance(res, dict):
+            for key, value in res.items():
+                if key != "screenshot" and key != "error":
+                    console.print(f"  {key}: {_safe_str(value)}")
+        else:
+            console.print(f"  {_safe_str(res)}")
+
+    if args.save_results:
+        with open(args.save_results, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "goal": args.goal,
+                    "results": result.result,
+                    "steps": result.steps_completed,
+                    "duration": result.duration,
+                    "action_history": result.action_history,
+                },
+                f,
+                indent=2,
+            )
+        print_success(f"Results saved to {args.save_results}")
 
 
 async def run_schedule_command(
@@ -1105,31 +1708,25 @@ async def run_run_command(
     """REPL loop calling orchestrator repeatedly."""
     from rich.prompt import Prompt
 
-    grok_cfg = config.grok if isinstance(config, FullConfig) else GrokConfig()
-    api_key = (
-        grok_cfg.api_key
-        or os.environ.get("XAI_API_KEY")
-        or os.environ.get("GROK_API_KEY")
-    )
-    if not api_key:
-        print_error("No Grok API key. Set XAI_API_KEY or configure.")
+    llm_client = _get_llm_client(config)
+    if not llm_client:
+        print_error("No LLM API key. Set XAI_API_KEY, ANTHROPIC_API_KEY, or configure.")
         return
+
+    await llm_client.__aenter__()
 
     memory = UnifiedMemory(config.memory if isinstance(config, FullConfig) else ConfigManager.create_default_config().memory)
     await memory.start()
 
-    grok = GrokClient(grok_cfg)
-    await grok.__aenter__()
-
     scheduler = SmartScheduler(
-        grok_client=grok,
+        grok_client=llm_client,
         enable_learning=True,
         enable_predictive=True,
         enable_monitoring=False,
     )
     await scheduler.start()
 
-    orchestrator = Orchestrator(config, grok, memory, scheduler)
+    orchestrator = Orchestrator(config, llm_client, memory, scheduler)
     opts = RunOptions(interactive=args.interactive, live_progress=True)
 
     print_header("Orchestrator REPL")
@@ -1162,7 +1759,59 @@ async def run_run_command(
     finally:
         await scheduler.stop()
         await memory.stop()
-        await grok.__aexit__(None, None, None)
+        await llm_client.__aexit__(None, None, None)
+
+
+async def run_onboard_command(
+    args: argparse.Namespace,
+    config: Union[FullConfig, Dict[str, Any]],
+) -> None:
+    """Handle onboard commands."""
+    from ..core.types import LLMConfig
+
+    if args.onboard_command != "llm":
+        return
+
+    provider = getattr(args, "provider", "grok")
+    api_key = getattr(args, "api_key", None)
+    prov = get_provider(provider)
+    env_var = prov.env_var if prov else "XAI_API_KEY"
+    if not api_key:
+        api_key = os.environ.get(env_var)
+    if not api_key:
+        print_error(
+            f"Provide --api-key or set {env_var}. "
+            "Get keys from x.ai (Grok) or console.anthropic.com (Claude)."
+        )
+        return
+
+    if isinstance(config, FullConfig):
+        if not config.llm:
+            config.llm = LLMConfig()
+        config.llm.primary = provider
+        if not config.llm.api_keys:
+            config.llm.api_keys = {}
+        config.llm.api_keys[provider] = api_key
+        config_path = Path.home() / ".grok-harness" / "config.yaml"
+        ConfigManager.save_config(config, config_path)
+        print_success(f"Configured {provider} as primary LLM. Saved to {config_path}")
+        llm_client = _get_llm_client(config)
+        if llm_client:
+            await llm_client.__aenter__()
+            try:
+                r = await llm_client.chat_completion(
+                    [{"role": "user", "content": "Say OK if you can hear me."}],
+                    max_tokens=10,
+                )
+                content = r["choices"][0]["message"]["content"]
+                if "ok" in content.lower():
+                    print_success("Connection test passed!")
+                else:
+                    print_info(f"Response: {content[:80]}")
+            finally:
+                await llm_client.__aexit__(None, None, None)
+    else:
+        print_error("Config format not supported for onboard")
 
 
 async def run_config_command(
@@ -1199,18 +1848,22 @@ async def run_config_command(
         parts = args.key.split(".")
         current: Any = config
         for part in parts[:-1]:
-            if hasattr(current, part):
+            if isinstance(current, dict):
+                current = current.get(part)
+            elif hasattr(current, part):
                 current = getattr(current, part)
             else:
                 print_error(f"Invalid key: {args.key}")
                 return
+            if current is None:
+                print_error(f"Invalid key: {args.key}")
+                return
 
         last_part = parts[-1]
-        current_val = (
-            getattr(current, last_part)
-            if hasattr(current, last_part)
-            else None
-        )
+        if isinstance(current, dict):
+            current_val = current.get(last_part)
+        else:
+            current_val = getattr(current, last_part, None)
 
         if isinstance(current_val, bool):
             value: Any = args.value.lower() in ["true", "yes", "1"]
@@ -1221,7 +1874,10 @@ async def run_config_command(
         else:
             value = args.value
 
-        setattr(current, last_part, value)
+        if isinstance(current, dict):
+            current[last_part] = value
+        else:
+            setattr(current, last_part, value)
 
         config_path = (
             Path(args.config)
@@ -1253,12 +1909,7 @@ async def main_async() -> int:
 
     try:
         if args.command in ["schedule", "jobs", "monitor"]:
-            api_key = (
-                config.grok.api_key
-                or os.environ.get("XAI_API_KEY")
-                or os.environ.get("GROK_API_KEY")
-            )
-            grok_client = GrokClient(config.grok) if api_key else None
+            grok_client = _get_llm_client(config)
             storage = Path.home() / ".grok-harness" / "scheduler"
             scheduler = SmartScheduler(
                 grok_client=grok_client,
@@ -1293,6 +1944,15 @@ async def main_async() -> int:
                 return 1
             await run_monitor_command(args, scheduler)
 
+        elif args.command == "onboard":
+            await run_onboard_command(args, config)
+
+        elif args.command == "setup":
+            from .setup_wizard import SetupWizard
+
+            wizard = SetupWizard()
+            await wizard.run()
+
         elif args.command == "config":
             await run_config_command(args, config)
 
@@ -1320,6 +1980,76 @@ async def main_async() -> int:
 
         elif args.command == "news":
             await run_news(args)
+
+        elif args.command == "heartbeat":
+            from ..core.session_manager import SessionManager
+            from ..core.heartbeat import HeartbeatEngine, HeartbeatConfig
+
+            grok_for_sm = _get_llm_client(config)
+            if grok_for_sm:
+                await grok_for_sm.__aenter__()
+
+            session_manager = SessionManager(config, grok_for_sm)
+            heartbeat_engine = HeartbeatEngine(session_manager)
+
+            if args.heartbeat_command == "start":
+                if getattr(args, "interval", None):
+                    heartbeat_engine.config.interval_seconds = args.interval
+                await heartbeat_engine.start()
+                print_success(
+                    f"Heartbeat engine started "
+                    f"(interval: {heartbeat_engine.config.interval_seconds}s)"
+                )
+                print_info("Press Ctrl+C to stop")
+                try:
+                    while True:
+                        await asyncio.sleep(60)
+                except KeyboardInterrupt:
+                    await heartbeat_engine.stop()
+                    print_info("Heartbeat stopped")
+            else:
+                await run_heartbeat_command(args, session_manager, heartbeat_engine)
+
+            if grok_for_sm:
+                await grok_for_sm.__aexit__(None, None, None)
+
+        elif args.command == "status":
+            from ..core.session_manager import SessionManager
+            from ..core.heartbeat import HeartbeatEngine
+
+            session_manager = SessionManager(config, None)
+            heartbeat_engine = HeartbeatEngine(session_manager)
+            await run_status_command(args, session_manager, heartbeat_engine)
+
+        elif args.command == "telegram":
+            await run_telegram_command(args, config)
+
+        elif args.command == "daemon":
+            from ..daemon import GrokClawDaemon
+
+            config_path = getattr(args, "config", None)
+            daemon = GrokClawDaemon(config_path=config_path)
+            print_info("Starting GrokClaw daemon (Ctrl+C to stop)...")
+            await daemon.run()
+
+        elif args.command == "session":
+            from ..core.session_manager import SessionManager
+
+            llm_client_check = _get_llm_client(config)
+            needs_llm = args.session_command in ("create", "send")
+            if needs_llm and not llm_client_check:
+                print_error(
+                    "Session create/send requires Grok API key. "
+                    "Set XAI_API_KEY or configure in config."
+                )
+                return 1
+
+            if llm_client_check and grok_client is None:
+                grok_client = llm_client_check
+                await grok_client.__aenter__()
+
+            session_manager = SessionManager(config, grok_client)
+            await run_session_command(args, config, session_manager)
 
     finally:
         if scheduler is not None:

@@ -45,6 +45,45 @@ async def test_named_agent_weather() -> None:
 
 
 @pytest.mark.asyncio
+async def test_spawn_agent_pattern_no_session_manager(tmp_path: Path) -> None:
+    """Test spawn pattern falls through when session_manager is None."""
+    from grok_harness.core.config_manager import ConfigManager
+    from grok_harness.core.orchestrator import Orchestrator, RunOptions
+    from grok_harness.core.types import MemoryConfig
+    from grok_harness.memory.unified import UnifiedMemory
+    from grok_harness.scheduler.smart import SmartScheduler
+
+    config = ConfigManager.create_default_config()
+    memory_config = MemoryConfig(
+        path=tmp_path / "memory.db",
+        enable_embeddings=False,
+        low_spec_mode=True,
+        enable_compression=False,
+    )
+    memory = UnifiedMemory(memory_config)
+    await memory.start()
+
+    scheduler = SmartScheduler(
+        grok_client=None,
+        storage_path=tmp_path / "scheduler",
+        enable_learning=False,
+        enable_predictive=False,
+        enable_monitoring=False,
+    )
+    await scheduler.start()
+
+    orchestrator = Orchestrator(config, None, memory, scheduler)
+    tool_result = await orchestrator._try_builtin_tool(
+        "spawn a researcher agent to find latest AI news"
+    )
+    # No session_manager: spawn fails, returns None (fall through to plan)
+    assert tool_result is None
+
+    await scheduler.stop()
+    await memory.stop()
+
+
+@pytest.mark.asyncio
 async def test_named_agent_help() -> None:
     """Test NamedAgent help command."""
     from grok_harness.agent.named_agent import NamedAgent

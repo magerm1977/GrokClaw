@@ -1,0 +1,15 @@
+# GrokClaw configuration example
+# Copy to config.yaml and fill in your values
+
+grok:
+  api_key: "your-xai-key-here"
+  model: "grok-4-1-fast-reasoning"
+  temperature: 0.3
+
+browser:
+  headless: true
+  timeout_ms: 30000
+
+memory:
+  path: "~/.grok-harness/memory.db"
+  ttl_days: 30

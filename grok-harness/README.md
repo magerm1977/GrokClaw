@@ -20,6 +20,13 @@ grok-harness --help
 
 See [docs/QUICKSTART.md](docs/QUICKSTART.md) for full usage.
 
+## Security Notes
+
+- Never commit your `.env` or `config.yaml` - they may contain API keys
+- API keys are encrypted at rest in Telegram config
+- Run `grok-harness setup` for interactive secure configuration
+- Copy `.env.example` to `.env` and fill in your values
+
 ## Installation
 
 ```bash

@@ -1,0 +1,11 @@
+Collecting playwright
+  Using cached playwright-1.58.0-py3-none-win_amd64.whl.metadata (3.5 kB)
+Collecting pyee<14,>=13 (from playwright)
+  Using cached pyee-13.0.1-py3-none-any.whl.metadata (3.0 kB)
+Requirement already satisfied: greenlet<4.0.0,>=3.1.1 in F:\ProgramData\Python\Python312\Lib\site-packages (from playwright) (3.2.4)
+Requirement already satisfied: typing-extensions in F:\ProgramData\Python\Python312\Lib\site-packages (from pyee<14,>=13->playwright) (4.15.0)
+Using cached playwright-1.58.0-py3-none-win_amd64.whl (36.8 MB)
+Using cached pyee-13.0.1-py3-none-any.whl (15 kB)
+Installing collected packages: pyee, playwright
+
+Successfully installed playwright-1.58.0 pyee-13.0.1

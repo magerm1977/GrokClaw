@@ -211,8 +211,26 @@ class GrokBrowserAgent:
         Returns:
             TaskResult with results and action history
         """
-        if not self.browser:
-            await self.initialize()
+        try:
+            if not self.browser:
+                await self.initialize()
+        except BrowserError as e:
+            if "Playwright" in str(e):
+                return TaskResult(
+                    task_id=self.session_id,
+                    success=False,
+                    steps_taken=0,
+                    results={
+                        "error": (
+                            "Browser automation requires Playwright. "
+                            "Run: playwright install chromium"
+                        ),
+                        "fix": "playwright install chromium",
+                    },
+                    action_history=[],
+                    duration_ms=0,
+                )
+            raise
 
         self.current_task = goal
         self.step_count = 0

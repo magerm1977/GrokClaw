@@ -35,7 +35,7 @@ grok-harness config set browser.headless true
 # One-line shortcuts
 grok-harness weather Pensacola
 grok-harness time
-grok-harness chat Fred
+grok-harness chat Assistant
 
 # Run a browser agent
 grok-harness agent "Get the title from example.com" --headless

@@ -133,3 +133,9 @@ class ValidationError(GrokHarnessError):
     """Input validation errors."""
 
     pass
+
+
+class MessagingError(GrokHarnessError):
+    """Messaging/notification errors (Telegram, etc.)."""
+
+    pass

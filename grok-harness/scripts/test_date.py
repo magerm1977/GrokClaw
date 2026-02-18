@@ -21,7 +21,7 @@ from grok_harness.agent.named_agent import NamedAgent
 
 async def test_date() -> None:
     """Test date correction and memory."""
-    agent = NamedAgent("Fred")
+    agent = NamedAgent("Assistant")
 
     test_sequence = [
         "what's the date?",
@@ -37,7 +37,7 @@ async def test_date() -> None:
     for query in test_sequence:
         safe_print(f"\nYou: {query}")
         response = await agent.chat(query)
-        safe_print(f"Fred: {response}")
+        safe_print(f"Assistant: {response}")
         await asyncio.sleep(0.1)
 
 

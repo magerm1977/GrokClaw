@@ -26,7 +26,7 @@ async def main() -> None:
         grok = GrokClient(config.grok)
         await grok.__aenter__()
 
-    agent = NamedAgent(name="Fred", grok=grok)
+    agent = NamedAgent(name="Assistant", grok=grok)
 
     console.print("\n[bold cyan]Testing Live Chat (Persistent Session)[/]")
     console.print("[dim]Type /exit to quit, /reset to reset[/]\n")
@@ -44,12 +44,12 @@ async def main() -> None:
                     await agent.reset_conversation()
                     agent.user_provided_date = None
                     agent.date_confirmed = False
-                    agent._save_state()
+                    agent._save_memory()
                     console.print("[dim]Conversation reset[/]")
                     continue
 
                 response = await agent.chat(user_input)
-                console.print(f"[bold blue]Fred:[/] {response}")
+                console.print(f"[bold blue]Assistant:[/] {response}")
 
             except (KeyboardInterrupt, EOFError):
                 break

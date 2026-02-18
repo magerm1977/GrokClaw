@@ -1,3 +1,21 @@
+# Sensitive data
+.env
+*.env
+.env.local
+config.yaml
+config.json
+*.key
+*.pem
+*.crt
+
+# GrokClaw specific
+.grok-harness/
+telegram.json
+*.db
+*.log
+*.cache
+
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -5,10 +23,17 @@ __pycache__/
 .Python
 .venv/
 venv/
-.env
+.env/
 *.egg-info/
 dist/
 build/
+*.egg
 .coverage
 htmlcov/
 .pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

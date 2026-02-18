@@ -20,13 +20,13 @@ class NamedAgent:
     An agent with a name for natural conversation.
 
     Example:
-        fred = NamedAgent("Fred", grok=grok_client)
-        response = await fred.chat("What's the weather in Pensacola?")
+        agent = NamedAgent("Assistant", grok=grok_client)
+        response = await agent.chat("What's the weather in Pensacola?")
     """
 
     def __init__(
         self,
-        name: str = "Fred",
+        name: str = "Assistant",
         grok: Optional[GrokClient] = None,
         memory: Optional[UnifiedMemory] = None,
         session_dir: Optional[Path] = None,
@@ -35,15 +35,18 @@ class NamedAgent:
         self.grok = grok
         self.memory = memory
         self.session_dir = session_dir or Path.home() / ".grok-harness"
-        self.storage_dir = self.session_dir / "agent_data"
+        self.storage_dir = self.session_dir / "agent_memory"
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.state_file = self.storage_dir / f"{name.lower()}_state.json"
+        self.memory_file = self.storage_dir / f"{name.lower()}_memory.json"
         self.conversation_history: List[Dict[str, Any]] = []
         self.max_history = 50
         self.user_provided_date: Optional[datetime] = None
         self.date_confirmed = False
         self.system_date = datetime.now()
-        self._load_state()
+        self.user_name: Optional[str] = None
+        self.user_preferences: Dict[str, Any] = {}
+        self.text_only_mode = False
+        self._load_memory()
         self.system_prompt = f"""You are {name}, a helpful AI assistant with access to tools.
 You can check weather, browse websites, and remember past conversations.
 Be friendly, concise, and helpful. If you need to use a tool, explain what you're doing.
@@ -58,39 +61,64 @@ You can also analyze websites: when given a URL, use the site analysis to provid
 
 NEVER cite timeanddate.com for date verification. Date is verified via worldtimeapi, timeapi, or system time only."""
 
-    def _load_state(self) -> None:
-        """Load saved agent state from disk."""
+    def _load_memory(self) -> None:
+        """Load persistent memory from disk."""
         try:
-            if self.state_file.exists():
-                state = json.loads(self.state_file.read_text(encoding="utf-8"))
+            data: Dict[str, Any] = {}
+            if self.memory_file.exists():
+                data = json.loads(self.memory_file.read_text(encoding="utf-8"))
             else:
-                # Migrate from old chat_sessions.json if present
-                old_file = self.session_dir / "chat_sessions.json"
-                if old_file.exists():
-                    data = json.loads(old_file.read_text(encoding="utf-8"))
-                    state = data.get(self.name, {})
+                # Migrate from agent_data state file
+                old_state = self.session_dir / "agent_data" / f"{self.name.lower()}_state.json"
+                if old_state.exists():
+                    data = json.loads(old_state.read_text(encoding="utf-8"))
                 else:
-                    return
+                    old_sessions = self.session_dir / "chat_sessions.json"
+                    if old_sessions.exists():
+                        sess = json.loads(old_sessions.read_text(encoding="utf-8"))
+                        data = sess.get(self.name, {})
 
-            dt_str = state.get("user_provided_date")
+            self.user_name = data.get("user_name")
+            self.user_preferences = data.get("user_preferences", {})
+            dt_str = data.get("user_provided_date")
             if dt_str:
-                self.user_provided_date = datetime.fromisoformat(dt_str)
-                self.date_confirmed = bool(state.get("date_confirmed", True))
+                try:
+                    self.user_provided_date = datetime.fromisoformat(dt_str)
+                    self.date_confirmed = bool(data.get("date_confirmed", True))
+                    if self.user_provided_date.date() != datetime.now().date():
+                        self.date_confirmed = False
+                except (ValueError, TypeError):
+                    self.user_provided_date = None
+                    self.date_confirmed = False
+            recent = data.get("recent_history", [])
+            if recent:
+                self.conversation_history = recent[-10:]
+            self._check_date_validity()
         except Exception:
             pass
 
-    def _save_state(self) -> None:
-        """Save agent state to disk."""
+    def _check_date_validity(self) -> None:
+        """Unconfirm saved date if it is more than 1 day old."""
+        if self.user_provided_date and self.date_confirmed:
+            days_diff = (datetime.now() - self.user_provided_date).days
+            if days_diff > 1:
+                self.date_confirmed = False
+
+    def _save_memory(self) -> None:
+        """Save persistent memory to disk."""
         try:
             self.storage_dir.mkdir(parents=True, exist_ok=True)
-            state: Dict[str, Any] = {
+            data: Dict[str, Any] = {
+                "user_name": self.user_name,
+                "user_preferences": self.user_preferences,
                 "user_provided_date": (
                     self.user_provided_date.isoformat() if self.user_provided_date else None
                 ),
                 "date_confirmed": self.date_confirmed,
+                "recent_history": self.conversation_history[-10:],
                 "last_updated": datetime.now().isoformat(),
             }
-            self.state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+            self.memory_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception:
             pass
 
@@ -137,6 +165,44 @@ NEVER cite timeanddate.com for date verification. Date is verified via worldtime
 
         return None
 
+    def _extract_preferences(self, message: str) -> None:
+        """Extract user preferences from messages."""
+        msg_lower = message.lower()
+        changed = False
+
+        # Temperature preference
+        if "celsius" in msg_lower or "metric" in msg_lower:
+            if self.user_preferences.get("temperature_unit") != "celsius":
+                self.user_preferences["temperature_unit"] = "celsius"
+                changed = True
+        elif "fahrenheit" in msg_lower or "imperial" in msg_lower:
+            if self.user_preferences.get("temperature_unit") != "fahrenheit":
+                self.user_preferences["temperature_unit"] = "fahrenheit"
+                changed = True
+
+        # Location from weather/forecast requests
+        if any(w in msg_lower for w in ("weather", "forecast")):
+            loc_match = re.search(
+                r"(?:weather|forecast)[^.]*(?:in|for)\s+([A-Za-z0-9\s,]+?)(?:\?|$|\.|\))",
+                message,
+                re.I,
+            )
+            if not loc_match:
+                loc_match = re.search(
+                    r"(?:in|for)\s+([A-Za-z0-9\s,]+?)(?:\?|$|\.)",
+                    message,
+                    re.I,
+                )
+            if loc_match:
+                loc = loc_match.group(1).strip()
+                if loc and len(loc) > 1 and len(loc) < 50:
+                    if self.user_preferences.get("last_location") != loc:
+                        self.user_preferences["last_location"] = loc
+                        changed = True
+
+        if changed:
+            self._save_memory()
+
     async def _handle_date_correction(self, message: str) -> Optional[str]:
         """Handle user date corrections."""
         # Only treat as date correction if message suggests setting the date
@@ -164,7 +230,7 @@ NEVER cite timeanddate.com for date verification. Date is verified via worldtime
 
         self.user_provided_date = parsed_date
         self.date_confirmed = True
-        self._save_state()
+        self._save_memory()
         formatted_date = parsed_date.strftime("%B %d, %Y")
 
         self.conversation_history.append({
@@ -173,7 +239,7 @@ NEVER cite timeanddate.com for date verification. Date is verified via worldtime
             "timestamp": datetime.now().isoformat(),
         })
         reply = (
-            f"Got it, Mark! I'll use **{formatted_date}** as the current date "
+            f"Got it! I'll use **{formatted_date}** as the current date "
             "going forward. Thanks for the correction!"
         )
         self.conversation_history.append({
@@ -184,10 +250,24 @@ NEVER cite timeanddate.com for date verification. Date is verified via worldtime
         return f"[{self.name}]: {reply}"
 
     def get_current_date(self) -> str:
-        """Get the current date (user-provided or system)."""
-        if self.user_provided_date:
+        """Get the current date - uses user date only if confirmed and from today."""
+        if (
+            self.user_provided_date
+            and self.date_confirmed
+            and self.user_provided_date.date() == datetime.now().date()
+        ):
             return self.user_provided_date.strftime("%B %d, %Y")
-        return self.system_date.strftime("%B %d, %Y")
+        return datetime.now().strftime("%B %d, %Y")
+
+    def get_current_year(self) -> int:
+        """Get the current year - uses user date only if still valid today."""
+        if (
+            self.user_provided_date
+            and self.date_confirmed
+            and self.user_provided_date.date() == datetime.now().date()
+        ):
+            return self.user_provided_date.year
+        return datetime.now().year
 
     async def _analyze_url(self, url: str) -> str:
         """
@@ -257,10 +337,39 @@ If the data doesn't contain certain information, state "Not found in page conten
         if len(self.conversation_history) > self.max_history:
             self.conversation_history = self.conversation_history[-self.max_history:]
 
-        # Check for date corrections first
+        self._extract_preferences(message)
+
+        # FIRST: Check for simple commands (ALWAYS works, no browser)
+        simple_response = await self._handle_simple_commands(message)
+        if simple_response:
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": simple_response,
+                "timestamp": datetime.now().isoformat(),
+            })
+            self._save_memory()
+            return f"[{self.name}]: {simple_response}"
+
+        # SECOND: Check for date corrections
         date_response = await self._handle_date_correction(message)
         if date_response:
             return date_response
+
+        # THIRD: In text-only mode, use Grok directly (skip URL analysis)
+        if self.text_only_mode:
+            if self.grok:
+                response = await self._get_grok_response(message)
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": response,
+                    "timestamp": datetime.now().isoformat(),
+                })
+                self._save_memory()
+                return f"[{self.name}]: {response}"
+            return (
+                f"[{self.name}]: I'm in text-only mode. "
+                "Please configure browser for full functionality."
+            )
 
         urls = self._extract_urls(message)
         if urls:
@@ -271,6 +380,7 @@ If the data doesn't contain certain information, state "Not found in page conten
                     "content": result,
                     "timestamp": datetime.now().isoformat(),
                 })
+                self._save_memory()
                 return f"[{self.name}]: {result}"
             url_analyses = []
             for u in urls:
@@ -287,16 +397,8 @@ If the data doesn't contain certain information, state "Not found in page conten
                     "content": response,
                     "timestamp": datetime.now().isoformat(),
                 })
+                self._save_memory()
                 return f"[{self.name}]: {response}"
-
-        response = await self._handle_simple_commands(message)
-        if response:
-            self.conversation_history.append({
-                "role": "assistant",
-                "content": response,
-                "timestamp": datetime.now().isoformat(),
-            })
-            return f"[{self.name}]: {response}"
 
         if self.grok:
             response = await self._get_grok_response(message)
@@ -311,6 +413,7 @@ If the data doesn't contain certain information, state "Not found in page conten
             "content": response,
             "timestamp": datetime.now().isoformat(),
         })
+        self._save_memory()
         return f"[{self.name}]: {response}"
 
     def _normalize_message(self, text: str) -> str:
@@ -318,17 +421,186 @@ If the data doesn't contain certain information, state "Not found in page conten
         return text.replace("\u2019", "'").replace("\u2018", "'").lower().strip()
 
     async def _handle_simple_commands(self, message: str) -> Optional[str]:
-        """Handle simple commands without calling Grok."""
+        """Handle simple commands without calling Grok or browser."""
         msg_lower = self._normalize_message(message)
+
+        # ----- BASIC MATH -----
+        math_queries = {
+            "2+2": "4",
+            "5+5": "10",
+            "10*10": "100",
+            "100/2": "50",
+        }
+        msg_no_spaces = msg_lower.replace(" ", "")
+        for query, answer in math_queries.items():
+            if query in msg_no_spaces:
+                return f"**{answer}**"
+        if re.match(r"^[\d\s\+\-\*\/\(\)\.]+$", message.replace(" ", "")):
+            try:
+                result = eval(message, {"__builtins__": {}}, {})
+                return f"The result is: **{result}**"
+            except Exception:
+                pass
+
+        # ----- AGENT NAME -----
+        if any(
+            q in msg_lower
+            for q in ("what is your name", "your name", "who are you")
+        ):
+            return (
+                f"My name is **{self.name}**. "
+                "I'm your AI assistant powered by Grok!"
+            )
+
+        # ----- BASIC INFO -----
+        if any(
+            q in msg_lower
+            for q in ("what is 2+2", "2+2", "what is 2 + 2")
+        ):
+            return "2 + 2 = **4**"
+
+        # ----- CRYPTO PRICES (NO BROWSER) -----
+        if any(
+            phrase in msg_lower
+            for phrase in ("bitcoin price", "btc price", "crypto price")
+        ):
+            from ..tools.crypto_price import CryptoPriceTool
+
+            return await CryptoPriceTool.get_price_message()
+
+        # ----- WEATHER (NO BROWSER, wttr fallback) -----
+        if any(w in msg_lower for w in ("weather", "temperature", "forecast")):
+            location_match = re.search(
+                r"(?:weather|temperature|forecast)[\s,]+(?:in|for|at)?\s*([A-Za-z0-9\s,]+?)(?:\?|$|\.)",
+                message,
+                re.I,
+            )
+            if not location_match:
+                location_match = re.search(
+                    r"(?:in|for|at)\s+([A-Za-z0-9\s,]+?)(?:\?|$|\.)",
+                    message,
+                    re.I,
+                )
+            raw_location = (
+                location_match.group(1).strip() if location_match else ""
+            )
+            skip_words = ("what", "how", "is", "the", "weather", "forecast", "today")
+            location = (
+                raw_location
+                if raw_location
+                and not any(w in raw_location.lower() for w in skip_words)
+                else self.user_preferences.get("last_location", "")
+            )
+            if location:
+                if "forecast" in msg_lower or "day" in msg_lower:
+                    days = 5 if "5" in message else 7 if "7" in message else 3
+                    result = await WeatherTool.get_forecast(location, days)
+                    if result.get("success"):
+                        return (
+                            f"Here's the {days}-day forecast for {location}:\n"
+                            f"{result['data']}"
+                        )
+                else:
+                    result = await WeatherTool.get_current(location)
+                    if result.get("success"):
+                        return (
+                            f"Here's the weather for {location}:\n"
+                            f"{result['data']}"
+                        )
+                    # Fallback to wttr.in (still no browser)
+                    try:
+                        import aiohttp
+
+                        url = (
+                            f"https://wttr.in/{location.replace(' ', '+')}"
+                            "?format=%l:+%c+%t+%w&m"
+                        )
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(
+                                url,
+                                timeout=aiohttp.ClientTimeout(total=5),
+                            ) as resp:
+                                if resp.status == 200:
+                                    text = (await resp.text()).strip()
+                                    return f"Weather for {location}:\n{text}"
+                    except Exception:
+                        pass
+                return (
+                    f"Sorry, I couldn't get the weather: "
+                    f"{result.get('error', 'Unknown error')}"
+                )
+            return "Please specify a location, e.g., 'weather in London'"
+
+        # ----- DATE (NO BROWSER) -----
+        date_queries = (
+            "what is the date",
+            "what's the date",
+            "current date",
+            "today",
+            "whats the date",
+        )
+        if any(q in msg_lower for q in date_queries):
+            date_str = self.get_current_date()
+            return f"Today is **{date_str}**"
+
+        # ----- TIME (NO BROWSER) -----
+        if any(
+            q in msg_lower
+            for q in ("what time is it", "current time")
+        ):
+            now = datetime.now()
+            return f"The current time is **{now.strftime('%I:%M %p')}**"
+
+        # ----- HELP -----
+        if msg_lower in ("help", "what can you do"):
+            return f"""I'm {self.name}, your AI assistant! I can:
+
+- **Weather**: "weather in London"
+- **Crypto**: "bitcoin price"
+- **Math**: "2 + 2"
+- **Date**: "what's the date"
+- **Time**: "what time is it"
+- **Chat**: Just talk to me naturally!
+
+For complex tasks, I can browse websites and use tools."""
+
+        # ----- USER NAME QUERY -----
+        if (
+            "what is my name" in msg_lower
+            or "do you remember my name" in msg_lower
+        ):
+            if self.user_name:
+                return f"Your name is **{self.user_name}**!"
+            return "You haven't told me your name yet. What should I call you?"
+
+        # Name introduction
+        name_match = re.search(
+            r"(?:my name is|i'm|i am|call me)\s+([A-Za-z]+)",
+            message,
+            re.I,
+        )
+        if name_match:
+            self.user_name = name_match.group(1)
+            self._save_memory()
+            return f"Nice to meet you, **{self.user_name}**! I'll remember that."
+
+        # "remember" + preference - store for context
+        if "remember" in msg_lower and (
+            "prefer" in msg_lower or "like" in msg_lower or "want" in msg_lower
+        ):
+            self.user_preferences["last_note"] = message[:200]
+            self._save_memory()
 
         # "date" or "grok-harness date" - user may be asking for date
         if msg_lower in ("date", "grok-harness date") or msg_lower.endswith(" date"):
-            if self.user_provided_date:
-                return f"Today is **{self.get_current_date()}** (as you told me earlier)."
-            real_info = await CurrentEventsTool.get_current_date()
-            if real_info.get("warning"):
-                return f"Today is **{real_info['date']}** (system time - {real_info['warning']})"
-            return f"Today is **{real_info['date']}** (verified via {real_info['source']})."
+            date_str = self.get_current_date()
+            if (
+                self.user_provided_date
+                and self.date_confirmed
+                and self.user_provided_date.date() == datetime.now().date()
+            ):
+                return f"Today is **{date_str}** (matches what you told me)."
+            return f"Today is **{date_str}** (system time)."
 
         # Explicit /setdate command
         if msg_lower.startswith("/setdate "):
@@ -337,7 +609,7 @@ If the data doesn't contain certain information, state "Not found in page conten
             if parsed:
                 self.user_provided_date = parsed
                 self.date_confirmed = True
-                self._save_state()
+                self._save_memory()
                 formatted = parsed.strftime("%B %d, %Y")
                 return (
                     f"Date set to **{formatted}**! I'll remember this for our conversation."
@@ -347,43 +619,13 @@ If the data doesn't contain certain information, state "Not found in page conten
                 "'February 16, 2026' or '2/16/2026'."
             )
 
-        # Date query (strip trailing ? for matching)
-        date_queries = (
-            "what is the date",
-            "what's the date",
-            "what is the current date",
-            "what's the current date",
-            "current date",
-            "today's date",
-            "whats the date",
-            "whats the date now",
-            "what's the date now",
-        )
-        msg_normalized = msg_lower.rstrip("?.").strip()
-        # Also match if message contains a date question (handles "what's the date?" with smart quotes)
-        is_date_query = (
-            msg_normalized in date_queries
-            or msg_normalized == "what is the date now"
-            or "whats the date" in msg_lower
-            or "what's the date" in msg_lower
-        )
-        if is_date_query:
-            if self.user_provided_date:
-                return f"Today is **{self.get_current_date()}** (as you told me earlier)."
-            real_info = await CurrentEventsTool.get_current_date()
-            if real_info.get("warning"):
-                return f"Today is **{real_info['date']}** (system time - {real_info['warning']})"
-            return f"Today is **{real_info['date']}** (verified via {real_info['source']})"
-
         # Current year query
         if any(
             phrase in msg_lower
             for phrase in ("this year", "current year", "what year", "what year is it")
         ):
-            if self.user_provided_date:
-                return f"The current year is **{self.user_provided_date.year}**."
-            real_info = await CurrentEventsTool.get_current_date()
-            return f"The current year is **{real_info['year']}** (verified via {real_info['source']})."
+            year = self.get_current_year()
+            return f"The current year is **{year}**."
 
         # News / current events query
         if any(
@@ -406,62 +648,12 @@ If the data doesn't contain certain information, state "Not found in page conten
                 )
             return "You haven't set a date yet. You can tell me the current date and I'll remember it."
 
-        if any(w in msg_lower for w in ("weather", "temperature", "forecast")):
-            location_match = re.search(
-                r"(?:weather|temperature|forecast)[\s,]+(?:in|for|at)?\s*([A-Za-z0-9\s,]+?)(?:\?|$|\.)",
-                message,
-                re.I,
-            )
-            if not location_match:
-                location_match = re.search(
-                    r"(?:in|for|at)\s+([A-Za-z0-9\s,]+?)(?:\?|$|\.)",
-                    message,
-                    re.I,
-                )
-            location = location_match.group(1).strip() if location_match else ""
-            if location:
-                current_date = self.get_current_date()
-                if "forecast" in msg_lower or "day" in msg_lower:
-                    days = 3
-                    if "5-day" in msg_lower or "5 day" in msg_lower:
-                        days = 5
-                    elif "7-day" in msg_lower or "7 day" in msg_lower:
-                        days = 7
-                    result = await WeatherTool.get_forecast(location, days)
-                    if result.get("success"):
-                        return (
-                            f"Here's the {days}-day forecast from {current_date} "
-                            f"for {location}:\n{result['data']}"
-                        )
-                else:
-                    result = await WeatherTool.get_current(location)
-                    if result.get("success"):
-                        return (
-                            f"Here's the weather for {location} on {current_date}:\n"
-                            f"{result['data']}"
-                        )
-                return f"Sorry, I couldn't get the weather: {result.get('error', 'Unknown error')}"
-
-        if msg_lower in ("help", "what can you do"):
-            return f"""I'm {self.name}, your AI assistant! I can:
-- Check weather (try: "weather in London")
-- Browse websites (try: "visit example.com")
-- Remember things (try: "remember my name is Alex")
-- Have conversations
-
-Just talk to me naturally!"""
-
         return None
 
     async def _get_grok_response(self, message: str) -> str:
         """Get response from Grok with current context."""
-        if self.user_provided_date:
-            current_date = self.get_current_date()
-            current_year = self.user_provided_date.year
-        else:
-            real_info = await CurrentEventsTool.get_current_date()
-            current_date = real_info["date"]
-            current_year = real_info["year"]
+        current_date = self.get_current_date()
+        current_year = self.get_current_year()
 
         news_context = ""
         try:
@@ -473,7 +665,13 @@ Just talk to me naturally!"""
         except Exception:
             pass
 
+        user_ctx = ""
+        if self.user_name:
+            user_ctx = f"\nUser's name is {self.user_name}."
+        if self.user_preferences:
+            user_ctx += f"\nUser preferences/notes: {self.user_preferences}"
         system_content = f"""{self.system_prompt}
+{user_ctx}
 
 IMPORTANT - CURRENT CONTEXT:
 - Current date: {current_date}

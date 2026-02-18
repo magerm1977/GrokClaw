@@ -35,8 +35,8 @@ async def main() -> None:
     print(f"Key Messages: {analysis.get('key_messages', [])[:2]}")
     print(f"Pricing: {analysis.get('pricing', [])}")
 
-    # Step 2: Get Fred's analysis (should use REAL data)
-    print("\nFred's Analysis (should match REAL data):")
+    # Step 2: Get agent analysis (should use REAL data)
+    print("\nAgent Analysis (should match REAL data):")
     print("-" * 40)
 
     config = ConfigManager.load()
@@ -45,7 +45,7 @@ async def main() -> None:
         return
 
     async with GrokClient(config.grok) as grok:
-        agent = NamedAgent("Fred", grok=grok)
+        agent = NamedAgent("Assistant", grok=grok)
         response = await agent.chat(url)
         print(response)
 

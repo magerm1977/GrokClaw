@@ -153,7 +153,7 @@ class InteractiveMode:
 [bold]analyze [url][/] - Analyze a website
   Example: analyze https://coachframe.io
 [bold]chat [name][/] - Chat with named agent (use /exit to return)
-  Example: chat Fred
+  Example: chat Assistant
 [bold]clear[/] - Clear screen
 [bold]exit[/] - Exit interactive mode
         """
@@ -163,7 +163,7 @@ class InteractiveMode:
         """Switch to chat mode with named agent."""
         from ..agent.named_agent import NamedAgent
 
-        name = args[0] if args else "Fred"
+        name = args[0] if args else "Assistant"
         self.chat_agent = NamedAgent(
             name=name,
             grok=self.grok,

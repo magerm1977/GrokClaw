@@ -23,7 +23,7 @@ async def test_current_events() -> None:
     from grok_harness.agent.named_agent import NamedAgent
     from grok_harness.tools.current_events import CurrentEventsTool
 
-    agent = NamedAgent("Fred")
+    agent = NamedAgent("Assistant")
 
     tests = [
         "what's the current date?",
@@ -40,7 +40,7 @@ async def test_current_events() -> None:
     for test in tests:
         safe_print(f"\nYou: {test}")
         response = await agent.chat(test)
-        safe_print(f"Fred: {response}")
+        safe_print(f"Assistant: {response}")
         await asyncio.sleep(0.2)
 
 

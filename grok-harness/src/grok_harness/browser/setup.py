@@ -30,9 +30,15 @@ class PlaywrightSetup:
         self._playwright_available: Optional[bool] = None
         self._browsers_installed: Dict[str, bool] = {}
 
-    async def ensure_playwright(self, force_reinstall: bool = False) -> bool:
+    async def ensure_playwright(
+        self, force_reinstall: bool = False, verbose: bool = True
+    ) -> bool:
         """
         Ensure Playwright is installed and ready.
+
+        Args:
+            force_reinstall: Force reinstall even if present
+            verbose: Print user-friendly progress messages
 
         Returns:
             True if Playwright is available and ready
@@ -40,12 +46,14 @@ class PlaywrightSetup:
         if not force_reinstall and self._check_playwright_installed():
             if await self._check_browsers_installed():
                 return True
-            return await self.install_browsers()
+            return await self.install_browsers(verbose=verbose)
 
-        if not await self._install_playwright_package(force_reinstall):
+        if not await self._install_playwright_package(
+            force_reinstall, verbose=verbose
+        ):
             return False
 
-        return await self.install_browsers()
+        return await self.install_browsers(verbose=verbose)
 
     def _check_playwright_installed(self) -> bool:
         """Check if playwright package is installed."""
@@ -72,9 +80,11 @@ class PlaywrightSetup:
             return False
 
     async def _install_playwright_package(
-        self, force_reinstall: bool = False
+        self, force_reinstall: bool = False, verbose: bool = True
     ) -> bool:
         """Install playwright via pip."""
+        if verbose:
+            print("📦 Installing Playwright package...")
         cmd = [sys.executable, "-m", "pip", "install"]
         if force_reinstall:
             cmd.append("--force-reinstall")
@@ -91,22 +101,30 @@ class PlaywrightSetup:
             if process.returncode != 0:
                 return False
 
+            if verbose:
+                print("✅ Playwright package installed")
             return True
 
         except Exception:
             return False
 
     async def install_browsers(
-        self, browsers: Optional[List[str]] = None
+        self,
+        browsers: Optional[List[str]] = None,
+        verbose: bool = True,
     ) -> bool:
         """
         Install Playwright browsers.
 
         Args:
             browsers: List of browsers to install (default: ['chromium'])
+            verbose: Print user-friendly progress messages
         """
         if browsers is None:
             browsers = ["chromium"]
+
+        if verbose:
+            print("🌐 Installing Playwright browsers (this may take a minute)...")
 
         try:
             if self.system == "linux":
@@ -127,8 +145,13 @@ class PlaywrightSetup:
             stdout, stderr = await process.communicate()
 
             if process.returncode != 0:
+                if verbose:
+                    print("❌ Could not install Playwright browsers. Try running:")
+                    print("   playwright install chromium")
                 return False
 
+            if verbose:
+                print("✅ Playwright browsers installed")
             for browser in browsers:
                 self._browsers_installed[browser] = await self._verify_browser(
                     browser
@@ -137,6 +160,9 @@ class PlaywrightSetup:
             return True
 
         except Exception:
+            if verbose:
+                print("❌ Could not install Playwright browsers. Try running:")
+                print("   playwright install chromium")
             return False
 
     async def _verify_browser(self, browser: str) -> bool:

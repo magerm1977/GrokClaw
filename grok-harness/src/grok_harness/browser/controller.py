@@ -52,6 +52,9 @@ class BrowserController:
         self.current_page: Optional[Page] = None
 
         self._is_initialized = False
+        self._playwright_checked = False
+        self.browser_available = False
+        self.text_only_mode = True
         self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._action_history: List[Dict[str, Any]] = []
 
@@ -59,20 +62,53 @@ class BrowserController:
         self.fingerprint_manager = BrowserFingerprint()
         self.current_fingerprint: Optional[Dict[str, Any]] = None
 
+    async def _ensure_playwright(self) -> bool:
+        """Ensure Playwright is installed and browsers are available."""
+        if self._playwright_checked:
+            return True
+        verbose = getattr(
+            self.config, "verbose_playwright_setup", False
+        )
+        ok = await self.setup.ensure_playwright(verbose=verbose)
+        if ok:
+            self._playwright_checked = True
+        return ok
+
     async def initialize(self) -> bool:
         """
         Initialize browser controller.
 
         Ensures Playwright is installed and launches browser.
+        On failure, continues in text-only mode (browser_available=False).
         """
         if self._is_initialized:
             return True
 
-        if not await self.setup.ensure_playwright():
-            raise BrowserError("Failed to setup Playwright")
+        try:
+            if not await self._ensure_playwright():
+                self.browser_available = False
+                self.text_only_mode = True
+                print(
+                    "Browser automation unavailable - running in text-only mode"
+                )
+                self._is_initialized = True
+                return True
 
-        self._check_resources()
-        await self._launch_browser()
+            self._check_resources()
+            await self._launch_browser()
+            self.browser_available = True
+            self.text_only_mode = False
+
+        except Exception as e:
+            self.browser_available = False
+            self.text_only_mode = True
+            err_msg = str(e)[:60] if len(str(e)) > 60 else str(e)
+            print(
+                f"Browser automation unavailable ({err_msg}) - "
+                "running in text-only mode"
+            )
+            self._is_initialized = True
+            return True
 
         self._is_initialized = True
         return True
